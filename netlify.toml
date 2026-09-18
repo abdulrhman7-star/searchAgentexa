@@ -1,0 +1,8 @@
+[build]
+  publish = "dist"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/gofile-search"
+  to = "/.netlify/functions/gofile-search"
+  status = 200
