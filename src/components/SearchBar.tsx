@@ -13,6 +13,8 @@ import {
   Layers,
   ArrowRight,
 } from 'lucide-react';
+import { SiteField } from './search/SiteField';
+import { CrawlOptions } from '../../lib/crawler/types';
 
 export interface SampleImageOption {
   label: string;
@@ -56,6 +58,10 @@ interface SearchBarProps {
   selectedImage?: { urlOrData: string; filename?: string } | null;
   onClearImage?: () => void;
   loading: boolean;
+  site?: string;
+  setSite?: (s: string) => void;
+  crawlOptions?: CrawlOptions;
+  setCrawlOptions?: (opts: CrawlOptions) => void;
 }
 
 const SAMPLE_QUERIES = [
@@ -73,6 +79,10 @@ export const SearchBar: React.FC<SearchBarProps> = ({
   selectedImage,
   onClearImage,
   loading,
+  site,
+  setSite,
+  crawlOptions,
+  setCrawlOptions,
 }) => {
   const [showImageModal, setShowImageModal] = useState<boolean>(false);
   const [imageUrlInput, setImageUrlInput] = useState<string>('');
@@ -161,7 +171,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
     e.preventDefault();
     if (selectedImage) {
       onImageSearch?.(selectedImage.urlOrData, selectedImage.filename, query);
-    } else if (query.trim()) {
+    } else if (query.trim() || site?.trim()) {
       onSearch(query);
     }
   };
@@ -209,9 +219,11 @@ export const SearchBar: React.FC<SearchBarProps> = ({
             placeholder={
               selectedImage
                 ? 'Optional: Ask specific details about this image or press Search...'
+                : site?.trim()
+                ? `Search within crawled ${site}... (or leave empty to browse all)`
                 : 'Search with Exa AI & Extract Images, Videos, or Search by Image...'
             }
-            className="w-full py-3 pr-2 text-gray-900 bg-transparent text-sm sm:text-base focus:outline-none placeholder:text-gray-400"
+            className="w-full py-3 pr-2 text-gray-900 bg-transparent text-sm sm:text-base focus:outline-none placeholder:text-gray-400 min-w-0"
           />
 
           {/* Clear text button */}
@@ -223,6 +235,19 @@ export const SearchBar: React.FC<SearchBarProps> = ({
             >
               <X className="w-4 h-4" />
             </button>
+          )}
+
+          {/* Site Field (Desktop inline) */}
+          {setSite && (
+            <div className="hidden md:flex items-center shrink-0 mr-1.5">
+              <SiteField
+                site={site || ''}
+                setSite={setSite}
+                options={crawlOptions || {}}
+                setOptions={setCrawlOptions || (() => {})}
+                disabled={loading}
+              />
+            </div>
           )}
 
           {/* Visual Search Camera Button */}
@@ -243,7 +268,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
           {/* Main Submit Button */}
           <button
             type="submit"
-            disabled={loading || (!query.trim() && !selectedImage)}
+            disabled={loading || (!query.trim() && !selectedImage && !site?.trim())}
             className="px-5 sm:px-6 py-3 bg-black hover:bg-gray-800 text-white font-medium rounded-full shadow-sm flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200 text-xs sm:text-sm shrink-0"
           >
             {loading ? (
@@ -261,6 +286,19 @@ export const SearchBar: React.FC<SearchBarProps> = ({
             )}
           </button>
         </div>
+
+        {/* Mobile Site Field (Stacked below bar) */}
+        {setSite && (
+          <div className="flex md:hidden mt-2.5 justify-end px-2">
+            <SiteField
+              site={site || ''}
+              setSite={setSite}
+              options={crawlOptions || {}}
+              setOptions={setCrawlOptions || (() => {})}
+              disabled={loading}
+            />
+          </div>
+        )}
       </form>
 
       {/* Popover / Modal for Image Search Upload */}

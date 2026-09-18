@@ -1,3 +1,7 @@
+import { FileResult, FileQuery, FilePlatform } from '../lib/providers/file-provider';
+
+export type { FileResult, FileQuery, FilePlatform };
+
 export type SearchType = 'auto' | 'fast' | 'instant' | 'deep-lite' | 'deep' | 'deep-reasoning';
 
 export type CategoryTab = 'all' | 'filehosts' | 'images' | 'videos' | 'news' | 'papers' | 'people' | 'pdfs';
@@ -93,12 +97,14 @@ export interface ExaSearchResponse {
   searchType: SearchType;
   category: CategoryTab;
   results: SearchResultItem[];
+  files?: FileResult[];
   aiAnswer?: AIAnswer | null;
   visionAnalysis?: VisionAnalysisResult | null;
   sourceImage?: string | null;
   costDollars?: number;
   totalImagesCount: number;
   totalVideosCount: number;
+  totalFilesCount?: number;
   durationMs: number;
   cached?: boolean;
 }
@@ -113,4 +119,14 @@ export interface SearchFilterParams {
   startPublishedDate?: string;
   endPublishedDate?: string;
   enableCrawl?: boolean;
+  filePlatforms?: FilePlatform[];
+  fileTypes?: string[];
+  minSizeMb?: number;
+  maxSizeMb?: number;
+  dateAdded?: string;
+  customStartDate?: string;
+  customEndDate?: string;
+  fileLanguage?: 'any' | 'en' | 'ar';
+  hideFlaggedFiles?: boolean;
+  fileSort?: 'relevance' | 'newest' | 'size' | 'popularity';
 }

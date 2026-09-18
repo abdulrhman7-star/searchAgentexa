@@ -9,6 +9,13 @@ import { VideoGalleryView } from './components/VideoGalleryView';
 import { MediaLightboxModal } from './components/MediaLightboxModal';
 import { FilterDrawer } from './components/FilterDrawer';
 import { VisionPipelineCard } from './components/VisionPipelineCard';
+import { FilesResultsView } from './components/FilesResultsView';
+import { FileFilterState } from './components/FileFilterBar';
+import { CrawlProgress } from './components/search/CrawlProgress';
+import { ActiveSiteChip } from './components/search/ActiveSiteChip';
+import { SiteSearchResultsView } from './components/search/SiteSearchResultsView';
+import { useCrawl } from '../lib/crawler/useCrawl';
+import { CrawlOptions, SiteSearchResult } from '../lib/crawler/types';
 import {
   ExaSearchResponse,
   CategoryTab,
@@ -64,6 +71,126 @@ export default function App() {
     enableCrawl: true,
   });
 
+  // Site Crawl & Scoped Search State
+  const [site, setSite] = useState<string>('');
+  const [crawlOptions, setCrawlOptions] = useState<CrawlOptions>({});
+  const [siteResults, setSiteResults] = useState<SiteSearchResult[]>([]);
+  const [siteSearchDurationMs, setSiteSearchDurationMs] = useState<number | undefined>(undefined);
+  const crawl = useCrawl();
+
+  // Search within crawled local index
+  const performSiteSearch = async (targetCrawlId: string, q?: string) => {
+    const queryStr = q !== undefined ? q : query;
+    const startTime = Date.now();
+    try {
+      const response = await fetch('/api/search/site', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          crawlId: targetCrawlId,
+          query: queryStr,
+          tabs: ['pages', 'files'],
+          limit: 50,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Site search failed with status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const combined = [...(data.pages || []), ...(data.files || [])];
+      setSiteResults(combined);
+      setSiteSearchDurationMs(Date.now() - startTime);
+    } catch (err: any) {
+      console.error('Site search error:', err);
+    }
+  };
+
+  const handleClearSite = () => {
+    setSite('');
+    crawl.clear();
+    setSiteResults([]);
+  };
+
+  // Auto-search local index when crawl finishes
+  useEffect(() => {
+    if (crawl.status === 'completed' && crawl.crawlId && site.trim()) {
+      performSiteSearch(crawl.crawlId, query);
+    }
+  }, [crawl.status, crawl.crawlId]);
+
+  // Files & Documents Filter Bar State
+  const [fileFilters, setFileFilters] = useState<FileFilterState>({
+    platforms: [],
+    fileTypes: [],
+    minSizeMb: undefined,
+    maxSizeMb: undefined,
+    dateAdded: 'any',
+    customStartDate: undefined,
+    customEndDate: undefined,
+    language: 'any',
+    hideFlagged: true,
+    sort: 'relevance',
+  });
+
+  const performFilesSearch = async (customQuery?: string, customFilters?: FileFilterState) => {
+    const q = customQuery !== undefined ? customQuery : query;
+    if (!q.trim()) return;
+    const f = customFilters || fileFilters;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/files/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: q.trim(),
+          platforms: f.platforms,
+          fileTypes: f.fileTypes,
+          minSizeMb: f.minSizeMb,
+          maxSizeMb: f.maxSizeMb,
+          dateAdded: f.dateAdded,
+          customStartDate: f.customStartDate,
+          customEndDate: f.customEndDate,
+          language: f.language,
+          hideFlagged: f.hideFlagged,
+          sort: f.sort,
+          limit: 30,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSearchResponse((prev) => {
+          if (!prev) {
+            return {
+              query: q,
+              requestId: `req_${Date.now()}`,
+              searchType: 'auto',
+              category: 'filehosts',
+              results: [],
+              files: data.results || [],
+              totalFilesCount: data.total || 0,
+              cached: data.cached,
+            };
+          }
+          return {
+            ...prev,
+            files: data.results || [],
+            totalFilesCount: data.total || 0,
+          };
+        });
+      }
+    } catch (err: any) {
+      console.warn('Files search error:', err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const fetchGofileSearch = async (searchQuery: string, folder?: string) => {
     if (!searchQuery.trim()) return;
     setGofileLoading(true);
@@ -88,6 +215,27 @@ export default function App() {
 
   const performSearch = async (searchQuery?: string, targetCategory?: CategoryTab) => {
     const queryToUse = searchQuery !== undefined ? searchQuery : query;
+
+    // If site input is specified, execute crawl and scoped local search!
+    if (site.trim()) {
+      setLoading(true);
+      setError(null);
+      try {
+        let activeCrawlId = crawl.crawlId;
+        if (!activeCrawlId || crawl.host !== site.trim().toLowerCase()) {
+          activeCrawlId = await crawl.start(site, crawlOptions);
+        }
+        if (activeCrawlId) {
+          await performSiteSearch(activeCrawlId, queryToUse);
+        }
+      } catch (err: any) {
+        setError(err.message || 'Crawl failed');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     if (!queryToUse.trim()) return;
 
     const catToUse = targetCategory || activeCategory;
@@ -95,7 +243,7 @@ export default function App() {
     setLoading(true);
     setError(null);
 
-    // If File Hosts category is active and direct Gofile querying is enabled, trigger Gofile search in parallel
+    // If File Hosts category is active, also trigger direct Gofile query if configured
     if (catToUse === 'filehosts' && queryGofileDirect) {
       fetchGofileSearch(queryToUse);
     }
@@ -108,6 +256,16 @@ export default function App() {
           query: queryToUse,
           type: searchType,
           category: catToUse,
+          filePlatforms: fileFilters.platforms,
+          fileTypes: fileFilters.fileTypes,
+          minSizeMb: fileFilters.minSizeMb,
+          maxSizeMb: fileFilters.maxSizeMb,
+          dateAdded: fileFilters.dateAdded,
+          customStartDate: fileFilters.customStartDate,
+          customEndDate: fileFilters.customEndDate,
+          fileLanguage: fileFilters.language,
+          hideFlaggedFiles: fileFilters.hideFlagged,
+          fileSort: fileFilters.sort,
           numResults: filters.numResults || 20,
           includeDomains: filters.includeDomains,
           excludeDomains: filters.excludeDomains,
@@ -186,8 +344,11 @@ export default function App() {
   // Handle Tab Switch
   const handleCategoryTabChange = (newCat: CategoryTab) => {
     setActiveCategory(newCat);
-    if (newCat === 'filehosts' && queryGofileDirect) {
-      fetchGofileSearch(query);
+    if (newCat === 'filehosts') {
+      if (!searchResponse?.files || searchResponse.files.length === 0) {
+        performFilesSearch(query, fileFilters);
+      }
+      return;
     }
     if (newCat !== 'images' && newCat !== 'videos' && searchResponse?.category !== newCat) {
       if (selectedImage) {
@@ -275,7 +436,7 @@ export default function App() {
         durationMs={searchResponse?.durationMs}
       />
 
-      {/* 2. Main Search Bar */}
+      {/* 2. Main Search Bar with Site Field */}
       <SearchBar
         query={query}
         setQuery={setQuery}
@@ -283,17 +444,55 @@ export default function App() {
         onImageSearch={(img, filename, prompt) => performImageSearch(img, filename, prompt)}
         selectedImage={selectedImage}
         onClearImage={handleClearImage}
-        loading={loading}
+        loading={loading || crawl.isCrawling}
+        site={site}
+        setSite={setSite}
+        crawlOptions={crawlOptions}
+        setCrawlOptions={setCrawlOptions}
       />
 
+      {/* Crawl Progress Panel & Active Site Status */}
+      {site.trim() && (
+        <div className="max-w-4xl mx-auto px-4 w-full mb-4">
+          <CrawlProgress
+            status={crawl.status}
+            host={crawl.host || site}
+            stats={crawl.stats}
+            onCancel={crawl.cancel}
+            onSearchWhileCrawling={() => {
+              if (crawl.crawlId) performSiteSearch(crawl.crawlId, query);
+            }}
+            onClearIndex={handleClearSite}
+            onRefresh={crawl.refresh}
+            cached={crawl.cached}
+          />
+
+          {crawl.status === 'completed' && (
+            <div className="flex items-center gap-2 mt-2">
+              <span className="text-xs text-gray-500 font-medium">Active site scope:</span>
+              <ActiveSiteChip
+                site={crawl.host || site}
+                pagesCount={crawl.stats?.pagesCount}
+                filesCount={crawl.stats?.filesCount}
+                onClear={handleClearSite}
+                onRefresh={crawl.refresh}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 3. Category Tabs Bar */}
-      <CategoryTabs
-        activeCategory={activeCategory}
-        setActiveCategory={handleCategoryTabChange}
-        totalImagesCount={searchResponse?.totalImagesCount}
-        totalVideosCount={searchResponse?.totalVideosCount}
-        loading={loading}
-      />
+      {!site.trim() && (
+        <CategoryTabs
+          activeCategory={activeCategory}
+          setActiveCategory={handleCategoryTabChange}
+          totalImagesCount={searchResponse?.totalImagesCount}
+          totalVideosCount={searchResponse?.totalVideosCount}
+          totalFilesCount={searchResponse?.totalFilesCount || searchResponse?.files?.length || 0}
+          loading={loading}
+        />
+      )}
 
       {/* 4. Filter Drawer */}
       <FilterDrawer
@@ -325,18 +524,34 @@ export default function App() {
               <div className="absolute inset-0 rounded-full border-2 border-black border-t-transparent animate-spin"></div>
             </div>
             <h3 className="text-lg font-medium text-gray-900 mb-1 tracking-tight">
-              {selectedImage ? 'Executing Visual Search & Semantic Pipeline...' : 'Searching with Exa Neural Engine...'}
+              {selectedImage
+                ? 'Executing Visual Search & Semantic Pipeline...'
+                : site.trim()
+                ? `Crawling & Searching ${site}...`
+                : 'Searching with Exa Neural Engine...'}
             </h3>
             <p className="text-xs text-gray-400 font-light max-w-sm">
               {selectedImage
                 ? 'Running AI Vision OCR, entity detection, Exa queries, and deduplication.'
+                : site.trim()
+                ? 'Enumerating reachable pages, links, and public documents on target domain.'
                 : 'Retrieving high-rank sources, extracting images, and parsing video channels.'}
             </p>
           </div>
         )}
 
+        {/* Scoped Site Crawl Search Results */}
+        {!loading && site.trim() && (
+          <SiteSearchResultsView
+            results={siteResults}
+            site={crawl.host || site}
+            query={query}
+            elapsedMs={siteSearchDurationMs}
+          />
+        )}
+
         {/* AI Vision Pipeline Inspector (Shown on Visual Search) */}
-        {!loading && searchResponse?.visionAnalysis && (
+        {!loading && !site.trim() && searchResponse?.visionAnalysis && (
           <VisionPipelineCard
             vision={searchResponse.visionAnalysis}
             sourceImage={searchResponse.sourceImage || selectedImage?.urlOrData}
@@ -352,11 +567,11 @@ export default function App() {
         )}
 
         {/* Search Results Display */}
-        {!loading && searchResponse && (
+        {!loading && !site.trim() && searchResponse && (
           <div>
             {/* Search Summary Header */}
             <div className="flex flex-wrap items-center justify-between gap-2 mb-6 text-xs text-gray-400 font-light">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span>
                   Found <strong className="text-gray-900 font-semibold">{searchResponse.results.length}</strong> results
                 </span>
@@ -368,6 +583,10 @@ export default function App() {
                 <span>
                   <strong className="text-gray-900 font-semibold">{searchResponse.totalVideosCount}</strong> videos
                 </span>
+                <span>•</span>
+                <span>
+                  <strong className="text-gray-900 font-semibold">{searchResponse.totalFilesCount || searchResponse.files?.length || 0}</strong> files
+                </span>
               </div>
 
               {searchResponse.costDollars !== undefined && (
@@ -377,183 +596,54 @@ export default function App() {
               )}
             </div>
 
-            {/* TAB: "All" or "Files & Storage" or "News" or "Papers" or "People" or "PDFs" */}
+            {/* TAB: "Files & Documents" */}
+            {activeCategory === 'filehosts' && (
+              <FilesResultsView
+                files={searchResponse.files || []}
+                loading={loading}
+                query={query}
+                filters={fileFilters}
+                onFilterChange={(newF) => {
+                  setFileFilters(newF);
+                }}
+                onSearchAgain={() => performFilesSearch(query, fileFilters)}
+              />
+            )}
+
+            {/* TAB: "All" or "News" or "Papers" or "People" or "PDFs" */}
             {(activeCategory === 'all' ||
-              activeCategory === 'filehosts' ||
               activeCategory === 'news' ||
               activeCategory === 'papers' ||
               activeCategory === 'people' ||
               activeCategory === 'pdfs') && (
               <div className="space-y-6">
-                {activeCategory === 'filehosts' && (
-                  <div className="bg-white border border-gray-200/80 rounded-3xl p-5 shadow-xs space-y-4">
-                    {/* Top Row: Info & Gofile Toggle */}
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
-                          <HardDrive className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h4 className="text-sm font-semibold text-gray-900">Cloud Storage & File Hosts</h4>
-                            <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-blue-100/70 text-blue-800">
-                              Netlify & REST API
-                            </span>
-                          </div>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            Search public repositories and query Gofile API directly.
-                          </p>
-                        </div>
+                {/* Highlight banner in 'All' tab if public files were discovered */}
+                {activeCategory === 'all' && (searchResponse.files?.length ?? 0) > 0 && (
+                  <div
+                    onClick={() => setActiveCategory('filehosts')}
+                    className="p-4 bg-gradient-to-r from-gray-50 to-white border border-gray-200 rounded-2xl flex items-center justify-between cursor-pointer hover:border-gray-400 transition-all shadow-xs group"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="p-2.5 bg-black text-white rounded-xl">
+                        <HardDrive className="w-4 h-4" />
                       </div>
-
-                      {/* Controls: Gofile Toggle & Folder Config */}
-                      <div className="flex items-center gap-3 self-end sm:self-auto">
-                        <button
-                          type="button"
-                          onClick={() => setShowFolderConfig(!showFolderConfig)}
-                          className={`text-xs px-3 py-1.5 rounded-xl border font-medium transition-colors flex items-center gap-1.5 ${
-                            showFolderConfig || gofileFolderId
-                              ? 'bg-blue-50 border-blue-200 text-blue-800'
-                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                          }`}
-                        >
-                          <FolderOpen className="w-3.5 h-3.5 text-blue-600" />
-                          <span>{gofileFolderId ? `Folder: ${gofileFolderId.slice(0, 8)}...` : 'Folder ID'}</span>
-                        </button>
-
-                        <div className="flex items-center gap-2 pl-2 border-l border-gray-200">
-                          <span className="text-xs font-medium text-gray-700">Gofile API</span>
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={queryGofileDirect}
-                            onClick={() => {
-                              const next = !queryGofileDirect;
-                              setQueryGofileDirect(next);
-                              if (next && gofileResults.length === 0) {
-                                fetchGofileSearch(query);
-                              }
-                            }}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                              queryGofileDirect ? 'bg-black' : 'bg-gray-200'
-                            }`}
-                          >
-                            <span
-                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                queryGofileDirect ? 'translate-x-6' : 'translate-x-1'
-                              }`}
-                            />
-                          </button>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-gray-900">
+                            {searchResponse.files?.length} Public Files & Documents Discovered
+                          </span>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                            Archive.org • Gofile • Cloud Hosts
+                          </span>
                         </div>
+                        <p className="text-[11px] text-gray-500">
+                          Direct downloads, books, archives, and spreadsheets available for this query.
+                        </p>
                       </div>
                     </div>
-
-                    {/* Optional Folder ID configuration */}
-                    {showFolderConfig && (
-                      <div className="p-3.5 bg-gray-50/80 rounded-2xl border border-gray-200 space-y-2 text-xs">
-                        <div className="flex items-center justify-between">
-                          <label className="font-medium text-gray-700">Gofile Folder ID / Share Code</label>
-                          <span className="text-[10px] text-gray-400">Leaves blank for root folder or public search</span>
-                        </div>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            placeholder="e.g. 9f8e7d6c-5b4a-3928 or x7k2p9Qm"
-                            value={gofileFolderId}
-                            onChange={(e) => setGofileFolderId(e.target.value)}
-                            className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-1.5 text-xs text-gray-900 focus:outline-none focus:border-black"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => fetchGofileSearch(query, gofileFolderId)}
-                            className="px-3 py-1.5 bg-black text-white rounded-xl font-medium hover:bg-gray-800 transition-colors"
-                          >
-                            Search Folder
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Gofile Status & Direct API Results */}
-                    {queryGofileDirect && (
-                      <div className="pt-2 border-t border-gray-100">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-semibold text-gray-900">Gofile Live Files</span>
-                            {gofileLoading && (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
-                            )}
-                            {!gofileLoading && gofileResults.length > 0 && (
-                              <span className="text-[11px] font-mono font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">
-                                {gofileResults.length} found
-                              </span>
-                            )}
-                          </div>
-                          {gofileNote && (
-                            <span className="text-[11px] text-gray-500 italic max-w-md truncate">
-                              {gofileNote}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Gofile Results List */}
-                        {gofileResults.length > 0 ? (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-2">
-                            {gofileResults.map((item) => (
-                              <div
-                                key={item.id}
-                                className="flex items-center justify-between p-3 rounded-2xl bg-gray-50/70 border border-gray-200/70 hover:border-gray-300 transition-colors group"
-                              >
-                                <div className="flex items-center gap-2.5 min-w-0 pr-2">
-                                  <div className="w-8 h-8 rounded-xl bg-white border border-gray-200 flex items-center justify-center shrink-0 text-gray-600 group-hover:text-blue-600">
-                                    <FileText className="w-4 h-4" />
-                                  </div>
-                                  <div className="min-w-0">
-                                    <p className="text-xs font-medium text-gray-900 truncate leading-snug">
-                                      {item.name || item.title}
-                                    </p>
-                                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-gray-500">
-                                      {item.sizeFormatted && (
-                                        <span className="font-mono bg-white px-1.5 py-0.5 rounded border border-gray-100">
-                                          {item.sizeFormatted}
-                                        </span>
-                                      )}
-                                      <span className="capitalize">{item.type || 'file'}</span>
-                                    </div>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  <a
-                                    href={item.downloadUrl || item.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="p-1.5 rounded-xl bg-white border border-gray-200 text-gray-700 hover:bg-black hover:text-white hover:border-black transition-colors"
-                                    title="Open or Download File"
-                                  >
-                                    <Download className="w-3.5 h-3.5" />
-                                  </a>
-                                  <a
-                                    href={item.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="p-1.5 rounded-xl bg-white border border-gray-200 text-gray-500 hover:text-black hover:border-gray-300 transition-colors"
-                                    title="View Source Page"
-                                  >
-                                    <ExternalLink className="w-3.5 h-3.5" />
-                                  </a>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : !gofileLoading ? (
-                          <div className="p-3 rounded-2xl bg-gray-50/60 border border-dashed border-gray-200 text-center">
-                            <p className="text-xs text-gray-500">
-                              Direct Gofile API query is active. Results will appear here when files match or shared links are resolved.
-                            </p>
-                          </div>
-                        ) : null}
-                      </div>
-                    )}
+                    <span className="text-xs font-semibold text-gray-900 group-hover:underline flex items-center gap-1">
+                      View all files &rarr;
+                    </span>
                   </div>
                 )}
 

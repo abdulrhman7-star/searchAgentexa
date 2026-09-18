@@ -7,6 +7,10 @@ import { searchExa, crawlAndExtractMedia } from './server/mediaExtractor';
 import { generateSmartAnswer, generateImageSearchAnswer } from './agent';
 import { executeImageSearchPipeline } from './server/visionSearch';
 import { handler as gofileHandler } from './netlify/functions/gofile-search.js';
+import { globalFileRegistry } from './server/providers/fileSearchAggregator';
+import { startOrGetCrawl, getActiveCrawl, cancelCrawl, CrawlRunner } from './lib/crawler/runner';
+import { getCrawlById, deleteCrawl } from './lib/crawler/index-db';
+import { executeSiteSearch } from './lib/crawler/search';
 
 dotenv.config();
 
@@ -70,6 +74,65 @@ async function startServer() {
     }
   });
 
+  // Dedicated Files & Documents Search Endpoint (Archive.org, Gofile, Mediafire, Google Drive, Dropbox, Mega, Open Web)
+  app.post('/api/files/search', async (req, res) => {
+    const startTime = Date.now();
+    try {
+      const {
+        query,
+        platforms,
+        fileTypes,
+        minSizeMb,
+        maxSizeMb,
+        dateAdded,
+        customStartDate,
+        customEndDate,
+        language,
+        hideFlagged,
+        sort,
+        limit,
+      } = req.body;
+
+      if (!query || typeof query !== 'string' || !query.trim()) {
+        return res.status(400).json({ error: 'Search query is required' });
+      }
+
+      const cacheKey = `files_${JSON.stringify(req.body)}`;
+      const cached = searchCache.get<any>(cacheKey);
+      if (cached) {
+        return res.json({ ...cached, cached: true, durationMs: Date.now() - startTime });
+      }
+
+      const fileResults = await globalFileRegistry.searchAll({
+        query: query.trim(),
+        platforms,
+        fileTypes,
+        minSizeMb: minSizeMb ? Number(minSizeMb) : undefined,
+        maxSizeMb: maxSizeMb ? Number(maxSizeMb) : undefined,
+        dateAdded,
+        customStartDate,
+        customEndDate,
+        language,
+        hideFlagged: hideFlagged !== false,
+        sort: sort || 'relevance',
+        limit: limit ? Number(limit) : 24,
+      });
+
+      const responsePayload = {
+        results: fileResults,
+        total: fileResults.length,
+        durationMs: Date.now() - startTime,
+        cached: false,
+      };
+
+      searchCache.set(cacheKey, responsePayload, 300);
+      return res.json(responsePayload);
+    } catch (err: any) {
+      console.error('[API /api/files/search Error]:', err.message || err);
+      return res.status(500).json({ error: err.message || 'Files search failed' });
+    }
+  });
+
   // Main Search Endpoint
   app.post('/api/search', async (req, res) => {
     const startTime = Date.now();
@@ -109,6 +172,29 @@ async function startServer() {
       // 2. Perform Exa Search
       const { results, exaResponse, totalImagesCount, totalVideosCount } = await searchExa(normalizedQuery, req.body);
 
+      // Execute Files & Documents search if category is filehosts/pdfs or if filePlatforms/fileTypes are requested
+      let fileResults: any[] = [];
+      if (req.body.category === 'filehosts' || req.body.category === 'pdfs' || req.body.filePlatforms || req.body.fileTypes) {
+        try {
+          fileResults = await globalFileRegistry.searchAll({
+            query: normalizedQuery,
+            platforms: req.body.filePlatforms,
+            fileTypes: req.body.fileTypes,
+            minSizeMb: req.body.minSizeMb,
+            maxSizeMb: req.body.maxSizeMb,
+            dateAdded: req.body.dateAdded,
+            customStartDate: req.body.customStartDate,
+            customEndDate: req.body.customEndDate,
+            language: req.body.fileLanguage,
+            hideFlagged: req.body.hideFlaggedFiles !== false,
+            sort: req.body.fileSort || 'relevance',
+            limit: 24,
+          });
+        } catch (fErr: any) {
+          console.warn('[API /search File Provider Error]:', fErr.message);
+        }
+      }
+
       // 3. Synthesize Smart AI Answer using agent.ts
       let smartAnswerText = '';
       try {
@@ -142,6 +228,8 @@ async function startServer() {
         searchType: req.body.type || 'auto',
         category: req.body.category || 'all',
         results,
+        files: fileResults,
+        totalFilesCount: fileResults.length,
         aiAnswer,
         costDollars: exaResponse?.costDollars?.total,
         totalImagesCount,
@@ -228,6 +316,8 @@ async function startServer() {
         searchType: filters.type || 'auto',
         category: category as any,
         results: pipelineResult.results,
+        files: pipelineResult.files,
+        totalFilesCount: pipelineResult.totalFilesCount,
         aiAnswer,
         visionAnalysis: pipelineResult.visionAnalysis,
         sourceImage: image,
@@ -247,6 +337,216 @@ async function startServer() {
       return res.status(500).json({
         error: err.message || 'Image-based search pipeline failed',
       });
+    }
+  });
+
+  // ==========================================
+  // Crawler & Scoped Site Search Endpoints
+  // ==========================================
+
+  // POST /api/crawl/start (SSE streaming)
+  app.post('/api/crawl/start', async (req, res) => {
+    try {
+      const { site, pathPrefix, options } = req.body;
+      if (!site || typeof site !== 'string') {
+        return res.status(400).json({ error: 'Valid site domain is required' });
+      }
+
+      const mergedOptions = {
+        ...(options || {}),
+        ...(pathPrefix ? { pathPrefix } : {}),
+      };
+
+      const { crawlId, cached, runner } = await startOrGetCrawl(site, mergedOptions);
+
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      if (res.flushHeaders) res.flushHeaders();
+
+      // Emit initial meta
+      res.write(`data: ${JSON.stringify({ type: 'meta', crawlId, cached, site })}\n\n`);
+
+      if (cached) {
+        const existing = await getCrawlById(crawlId);
+        if (existing) {
+          res.write(
+            `data: ${JSON.stringify({
+              type: 'done',
+              data: { stats: existing.stats, reason: 'cached_index' },
+              crawlId,
+              cached: true,
+            })}\n\n`
+          );
+        }
+        res.end();
+        return;
+      }
+
+      if (runner) {
+        const cleanup = runner.on((event) => {
+          try {
+            res.write(`data: ${JSON.stringify({ ...event, crawlId, cached: false })}\n\n`);
+            if (event.type === 'done' || event.type === 'error') {
+              cleanup();
+              res.end();
+            }
+          } catch {
+            cleanup();
+          }
+        });
+
+        req.on('close', () => {
+          cleanup();
+        });
+      } else {
+        const active = getActiveCrawl(crawlId);
+        if (active) {
+          const listener = (event: any) => {
+            try {
+              res.write(`data: ${JSON.stringify({ ...event, crawlId, cached: false })}\n\n`);
+              if (event.type === 'done' || event.type === 'error') {
+                active.listeners.delete(listener);
+                res.end();
+              }
+            } catch {
+              active.listeners.delete(listener);
+            }
+          };
+          active.listeners.add(listener);
+          req.on('close', () => {
+            active.listeners.delete(listener);
+          });
+        } else {
+          res.end();
+        }
+      }
+    } catch (err: any) {
+      console.error('[API /crawl/start Error]:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || 'Crawl failed to start' });
+      }
+    }
+  });
+
+  // GET /api/crawl/:id (stats snapshot)
+  app.get('/api/crawl/:id', async (req, res) => {
+    try {
+      const id = req.params.id;
+      const active = getActiveCrawl(id);
+      if (active) {
+        return res.json(active.job);
+      }
+      const crawl = await getCrawlById(id);
+      if (!crawl) {
+        return res.status(404).json({ error: 'Crawl job not found' });
+      }
+      return res.json(crawl);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // DELETE /api/crawl/:id (cancel crawl & delete index)
+  app.delete('/api/crawl/:id', async (req, res) => {
+    try {
+      const id = req.params.id;
+      const cancelled = cancelCrawl(id);
+      await deleteCrawl(id);
+      return res.json({ success: true, cancelled });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/crawl/:id/refresh (re-crawl in background)
+  app.post('/api/crawl/:id/refresh', async (req, res) => {
+    try {
+      const id = req.params.id;
+      const crawl = await getCrawlById(id);
+      if (!crawl) {
+        return res.status(404).json({ error: 'Crawl job not found' });
+      }
+      const runner = new CrawlRunner(crawl.host, crawl.options, crawl.id);
+      runner.run().catch((err) => console.error('Refresh crawl error:', err));
+      return res.json({
+        success: true,
+        crawlId: runner.crawlId,
+        message: 'Re-crawl started in background',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/search/site (SSE streaming search within crawled site)
+  app.post('/api/search/site', async (req, res) => {
+    try {
+      const { crawlId, query = '', tabs = ['pages', 'files'], limit = 30 } = req.body;
+      if (!crawlId) {
+        return res.status(400).json({ error: 'crawlId is required' });
+      }
+
+      const searchResponse = await executeSiteSearch({
+        crawlId,
+        query,
+        tabs,
+        limit,
+      });
+
+      // If client requests standard JSON
+      if (req.headers.accept?.includes('application/json')) {
+        return res.json(searchResponse);
+      }
+
+      // Default SSE streaming format as specified in contract
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      if (res.flushHeaders) res.flushHeaders();
+
+      res.write(
+        `data: ${JSON.stringify({
+          type: 'meta',
+          host: searchResponse.host,
+          crawlId: searchResponse.crawlId,
+        })}\n\n`
+      );
+
+      if (searchResponse.pages.length > 0) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: 'batch',
+            tab: 'pages',
+            results: searchResponse.pages,
+          })}\n\n`
+        );
+      }
+
+      if (searchResponse.files.length > 0) {
+        res.write(
+          `data: ${JSON.stringify({
+            type: 'batch',
+            tab: 'files',
+            results: searchResponse.files,
+          })}\n\n`
+        );
+      }
+
+      res.write(
+        `data: ${JSON.stringify({
+          type: 'done',
+          elapsedMs: searchResponse.elapsedMs,
+          total: searchResponse.total,
+        })}\n\n`
+      );
+
+      res.end();
+    } catch (err: any) {
+      console.error('[API /search/site Error]:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || 'Site search failed' });
+      }
     }
   });
 

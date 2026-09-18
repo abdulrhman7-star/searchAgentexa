@@ -1,8 +1,9 @@
 import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
 import axios from 'axios';
-import { VisionAnalysisResult, ImageMedia, VideoMedia, SearchResultItem, ImageColorInfo } from '../src/types';
+import { VisionAnalysisResult, ImageMedia, VideoMedia, SearchResultItem, ImageColorInfo, FileResult } from '../src/types';
 import { searchExa, crawlAndExtractMedia, withRetry } from './mediaExtractor';
+import { globalFileRegistry } from './providers/fileSearchAggregator';
 
 // Cache to prevent duplicate vision calls for identical images
 const visionCache = new Map<string, VisionAnalysisResult>();
@@ -648,8 +649,10 @@ export async function executeImageSearchPipeline(params: {
   results: SearchResultItem[];
   images: ImageMedia[];
   videos: VideoMedia[];
+  files: FileResult[];
   totalImagesCount: number;
   totalVideosCount: number;
+  totalFilesCount: number;
   durationMs: number;
 }> {
   const startTime = Date.now();
@@ -703,6 +706,29 @@ export async function executeImageSearchPipeline(params: {
     console.warn('[Image Search Pipeline] Video query non-fatal error:', vidErr.message);
   }
 
+  // Step 4.5: Files & Documents search branch (Archive.org, Gofile, Mediafire, Google Drive, Dropbox, Open Web)
+  let discoveredFiles: FileResult[] = [];
+  try {
+    const fileSearchQuery = generatedQueries.exaQuery || visionAnalysis.keywords.slice(0, 3).join(' ') || 'files';
+    console.log(`[Image Search Pipeline] Step 4.5: Executing Files & Documents search for: "${fileSearchQuery}"`);
+    discoveredFiles = await globalFileRegistry.searchAll({
+      query: fileSearchQuery,
+      platforms: params.filters?.filePlatforms,
+      fileTypes: params.filters?.fileTypes,
+      minSizeMb: params.filters?.minSizeMb,
+      maxSizeMb: params.filters?.maxSizeMb,
+      dateAdded: params.filters?.dateAdded,
+      customStartDate: params.filters?.customStartDate,
+      customEndDate: params.filters?.customEndDate,
+      language: params.filters?.fileLanguage,
+      hideFlagged: params.filters?.hideFlaggedFiles !== false,
+      sort: params.filters?.fileSort || 'relevance',
+      limit: 24,
+    });
+  } catch (fileErr: any) {
+    console.warn('[Image Search Pipeline] File search non-fatal error:', fileErr.message);
+  }
+
   // Step 5: Deduplication and AI Ranking
   console.log(`[Image Search Pipeline] Step 5 & 6: Deduplicating and AI Ranking...`);
   const { rankedResults, rankedImages, rankedVideos } = deduplicateAndRank(
@@ -738,8 +764,10 @@ export async function executeImageSearchPipeline(params: {
     results: finalResults,
     images: rankedImages,
     videos: rankedVideos,
+    files: discoveredFiles,
     totalImagesCount: rankedImages.length,
     totalVideosCount: rankedVideos.length,
+    totalFilesCount: discoveredFiles.length,
     durationMs,
   };
 }

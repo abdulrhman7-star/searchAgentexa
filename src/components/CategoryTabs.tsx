@@ -4,11 +4,11 @@ import {
   Globe,
   Image as ImageIcon,
   Video as VideoIcon,
+  FolderArchive,
   Newspaper,
   BookOpen,
   Users,
   FileText,
-  HardDrive,
 } from 'lucide-react';
 
 interface CategoryTabsProps {
@@ -16,14 +16,15 @@ interface CategoryTabsProps {
   setActiveCategory: (cat: CategoryTab) => void;
   totalImagesCount?: number;
   totalVideosCount?: number;
+  totalFilesCount?: number;
   loading?: boolean;
 }
 
 const TABS: { id: CategoryTab; label: string; icon: React.FC<{ className?: string }> }[] = [
   { id: 'all', label: 'All', icon: Globe },
-  { id: 'filehosts', label: 'Files & Storage', icon: HardDrive },
   { id: 'images', label: 'Images', icon: ImageIcon },
   { id: 'videos', label: 'Videos', icon: VideoIcon },
+  { id: 'filehosts', label: 'Files & Documents', icon: FolderArchive },
   { id: 'news', label: 'News', icon: Newspaper },
   { id: 'papers', label: 'Papers', icon: BookOpen },
   { id: 'people', label: 'People', icon: Users },
@@ -35,6 +36,7 @@ export const CategoryTabs: React.FC<CategoryTabsProps> = ({
   setActiveCategory,
   totalImagesCount = 0,
   totalVideosCount = 0,
+  totalFilesCount = 0,
 }) => {
   return (
     <div className="w-full border-b border-gray-100 bg-white/80 sticky top-20 z-20 backdrop-blur-md">
@@ -47,10 +49,12 @@ export const CategoryTabs: React.FC<CategoryTabsProps> = ({
             let badgeCount: number | null = null;
             if (tab.id === 'images' && totalImagesCount > 0) badgeCount = totalImagesCount;
             if (tab.id === 'videos' && totalVideosCount > 0) badgeCount = totalVideosCount;
+            if (tab.id === 'filehosts' && totalFilesCount > 0) badgeCount = totalFilesCount;
 
             return (
               <button
                 key={tab.id}
+                id={`tab-${tab.id}`}
                 onClick={() => setActiveCategory(tab.id)}
                 className={`flex items-center gap-2 px-4 py-2 text-xs sm:text-sm font-medium rounded-full transition-all whitespace-nowrap shrink-0 ${
                   isActive

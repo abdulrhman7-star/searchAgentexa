@@ -1,6 +1,6 @@
 {
   "name": "Exa AI Search & Media Engine",
-  "description": "Smart web search powered by Exa API with AI Answers and Media Extractor Engine for images, videos, YouTube, TikTok, and streams.",
+  "description": "Smart multimodal search engine powered by Exa API, AI Vision, public Files & Documents discovery, and on-demand domain crawl-and-search with local FTS indexing.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
