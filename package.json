@@ -16,10 +16,6 @@
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@libsql/client": "^0.18.0",
-    "@tailwindcss/vite": "^4.1.14",
-    "@types/cors": "^2.8.19",
-    "@types/node-cache": "^4.2.5",
-    "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.19.0",
     "cheerio": "^1.2.0",
     "cors": "^2.8.6",
@@ -33,14 +29,16 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "robots-parser": "^3.0.1",
-    "undici": "^8.10.2",
-    "vite": "^6.2.3"
+    "undici": "^8.10.2"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.1.14",
     "@types/cheerio": "^1.0.0",
+    "@types/cors": "^2.8.19",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
-    "autoprefixer": "^10.4.21",
+    "@types/node-cache": "^4.2.5",
+    "@vitejs/plugin-react": "^5.0.4",
     "concurrently": "^10.0.4",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
